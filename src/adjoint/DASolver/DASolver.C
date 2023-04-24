@@ -1637,9 +1637,10 @@ void DASolver::calcFvSourceInternal(
     const word propName,
     const scalarField& aForce,
     const scalarField& tForce,
-    const scalarList& rDistList,
-    const scalarList& targetForce,
+    const scalarField& rDistList,
     const vector& center,
+    const scalar rInner,
+    const scalar rOuter,
     volVectorField& fvSource)
 {
     /*
@@ -1687,7 +1688,6 @@ void DASolver::calcFvSourceInternal(
     volVectorField meshTanDir = meshC * 0;
 
     // Normalization of the blade radius distribution.
-    scalar rOuter = (3 * rDistList[rDistList.size() - 1] - rDistList[rDistList.size() - 2]) / 2;
     scalarField rDist = rDistList * 0.0; // real blade radius distribution
     scalarField rNorm = rDist; // normalized blade radius distribution
     forAll(rDistList, index)
@@ -1700,64 +1700,14 @@ void DASolver::calcFvSourceInternal(
     }
 
     // Inner and outer radius distribution limits
-    scalar rStarMin = rNorm[0];
-    scalar rStarMax = rNorm[rNorm.size() - 1];
+    scalar rStarMin = rInner / rOuter;
+    scalar rStarMax = 1.0;
 
-    // Polynomial (inner) and Normal (outer) distribution  parameters' initialization
-    scalar f1 = aForce[aForce.size() - 2];
-    scalar f2 = aForce[aForce.size() - 1];
-    scalar f3 = aForce[0];
-    scalar f4 = aForce[1];
-    scalar g1 = tForce[tForce.size() - 2];
-    scalar g2 = tForce[tForce.size() - 1];
-    scalar g3 = tForce[0];
-    scalar g4 = tForce[1];
-    scalar r1 = rNorm[rNorm.size() - 2];
-    scalar r2 = rNorm[rNorm.size() - 1];
-    scalar r3 = rNorm[0];
-    scalar r4 = rNorm[1];
-    scalar df3 = (f4 - f3) / (r4 - r3);
-    scalar dg3 = (g4 - g3) / (r4 - r3);
-
-    // Polynomial (inner) and Normal (outer) distribution  parameters' computation
-    // Axial Outer
-    scalar mu = 2 * r1 - r2;
-    scalar maxI = 100;
-    scalar sigmaS = 0;
-    scalar i = 0;
-    for (i = 0; i < maxI; i++)
-    {
-        sigmaS = ((r2 - mu) * (r2 - mu) - (r1 - mu) * (r1 - mu)) / (2 * log(f1 / f2));
-        mu = r1 - sqrt(-2 * sigmaS * log(f1 * sqrt(2 * degToRad(180) * sigmaS)));
-        if (mu > r1)
-        {
-            mu = 2 * r1 - mu;
-        }
-    }
-    scalar sigmaAxialOut = sqrt(sigmaS);
-    scalar muAxialOut = mu;
-
-    // Tangential Outer
-    mu = 2 * r1 - r2;
-    for (i = 0; i < maxI; i++)
-    {
-        sigmaS = ((r2 - mu) * (r2 - mu) - (r1 - mu) * (r1 - mu)) / (2 * log(g1 / g2));
-        mu = r1 - sqrt(-2 * sigmaS * log(g1 * sqrt(2 * degToRad(180) * sigmaS)));
-        if (mu > r1)
-        {
-            mu = 2 * r1 - mu;
-        }
-    }
-    scalar sigmaTangentialOut = sqrt(sigmaS);
-    scalar muTangentialOut = mu;
-
-    // Axial Inner
-    scalar coefAAxialIn = (df3 * r3 - 2 * f3) / (2 * pow(r3, 4));
-    scalar coefBAxialIn = (f3 - coefAAxialIn * pow(r3, 4)) / (r3 * r3);
-
-    // Tangential Inner
-    scalar coefATangentialIn = (dg3 * r3 - 2 * g3) / (2 * pow(r3, 4));
-    scalar coefBTangentialIn = (g3 - coefATangentialIn * pow(r3, 4)) / (r3 * r3);
+    // Initialize Akima Interpolation
+    scalarField mAxl(rDistList.size() + 3);
+    setupAkima(mAxl, rNorm, aForce);
+    scalarField mTan(rDistList.size() + 3);
+    setupAkima(mTan, rNorm, tForce);
 
     // Cell 3D force computation loop
     forAll(meshC, cellI)
@@ -1783,42 +1733,95 @@ void DASolver::calcFvSourceInternal(
 
         scalar rStar = meshR / rOuter;
 
-        if (rStar < rStarMin)
+        if ((rStar > rStarMin) && (rStar < rStarMax))
         {
-            fvSource[cellI] = ((coefAAxialIn * pow(rStar, 4) + coefBAxialIn * pow(rStar, 2)) * axis + (coefATangentialIn * pow(rStar, 4) + coefBTangentialIn * pow(rStar, 2)) * cellAxDir * rotDirCon) * exp(-sqr(meshDist / actEps));
-        }
-        else if (rStar > rStarMax)
-        {
-            fvSource[cellI] = (1 / (sigmaAxialOut * sqrt(2 * degToRad(180)))) * exp(-0.5 * sqr((rStar - muAxialOut) / sigmaAxialOut)) * axis;
-            fvSource[cellI] = fvSource[cellI] + (1 / (sigmaTangentialOut * sqrt(2 * degToRad(180)))) * exp(-0.5 * sqr((rStar - muTangentialOut) / sigmaTangentialOut)) * cellAxDir * rotDirCon;
-            fvSource[cellI] = fvSource[cellI] * exp(-sqr(meshDist / actEps));
+            fvSource[cellI] = (interpolateAkima(mAxl, rNorm, aForce, rStar) * axis + interpolateAkima(mTan, rNorm, tForce, rStar) * cellAxDir * rotDirCon) * exp(-sqr(meshDist / actEps));
         }
         else
         {
-            fvSource[cellI] = (interpolateSplineXY(rStar, rNorm, aForce) * axis + interpolateSplineXY(rStar, rNorm, tForce) * cellAxDir * rotDirCon) * exp(-sqr(meshDist / actEps));
+            fvSource[cellI] = {0.0, 0.0, 0.0};
+        }
+    }
+}
+
+void DASolver::setupAkima(
+    scalarField& m,
+    scalarField& x,
+    scalarField y)
+{
+    int n = x.size();
+
+    // Setup End Slopes
+    m[0] = 0.0;
+    m[1] = 0.0;
+    m[n+1] = 0.0;
+    m[n+2] = 0.0;
+
+    // Setup Interior Slopes
+    for (int i = 2; i < n + 1; i++) {
+        m[i] = (y[i-1] - y[i-2]) / (x[i-1] - x[i-2]);
+    }
+
+    return;
+}
+
+scalar DASolver::interpolateAkima(
+    scalarField& m,
+    scalarField& x,
+    scalarField y,
+    scalar x_out)
+{
+    int n = x.size();
+
+    // Find Nearest Data Points with Binary Search
+    int l_i = 0;
+    int h_i = n - 1;
+    while (h_i - l_i > 1) {
+        int m_i = (h_i + l_i) / 2;
+        if (x[m_i] > x_out) {
+            h_i = m_i;
+        } else {
+            l_i = m_i;
         }
     }
 
-    // Scale factor computation loop
-    scalar scaleAxial = 0;
-    scalar scaleTangential = 0;
-    forAll(meshV, cellI)
-    {
-        scaleAxial = scaleAxial + (fvSource[cellI] & axis) * meshV[cellI];
-        scaleTangential = scaleTangential + (fvSource[cellI] & meshTanDir[cellI]) * meshV[cellI];
+    // Determine Slope at Interpolation Point
+    scalarField t(2);
+    for (int i = 0; i <= 1; i++) {
+        if ((abs(m[i + l_i + 3] - m[i + l_i + 2]) < 1e-10) &&
+            (abs(m[i + l_i + 1] - m[i + l_i]) < 1e-10)) {
+            t[i] = (m[i + l_i + 2] + m[i + l_i + 1]) / 2.0;
+        } else {
+            t[i] = (abs(m[i + l_i + 3] - m[i + l_i + 2]) * m[i + l_i + 1] +
+                    abs(m[i + l_i + 1] - m[i + l_i]) * m[i + l_i + 2]) /
+                   (abs(m[i + l_i + 3] - m[i + l_i + 2]) +
+                    abs(m[i + l_i + 1] - m[i + l_i]));
+        }
     }
-    reduce(scaleAxial, sumOp<scalar>());
-    reduce(scaleTangential, sumOp<scalar>());
-    scaleAxial = targetForce[0] / scaleAxial;
-    scaleTangential = targetForce[1] / scaleTangential * rotDirCon;
 
-    // Cell 3D force scaling loop
-    forAll(meshV, cellI)
-    {
-        fvSource[cellI][0] = fvSource[cellI][0] * mag(axis[0]) * scaleAxial + fvSource[cellI][0] * mag(meshTanDir[cellI][0]) * scaleTangential;
-        fvSource[cellI][1] = fvSource[cellI][1] * mag(axis[1]) * scaleAxial + fvSource[cellI][1] * mag(meshTanDir[cellI][1]) * scaleTangential;
-        fvSource[cellI][2] = fvSource[cellI][2] * mag(axis[2]) * scaleAxial + fvSource[cellI][2] * mag(meshTanDir[cellI][2]) * scaleTangential;
-    }
+    // Enforce Zero Derivative (modification from original Akima definition)
+    if (l_i == 0)
+      t[0] = 0.0;
+    if (h_i == n - 1)
+      t[1] = 0.0;
+
+    // Set Spline Polynomial Coefficients
+    scalarField p(4);
+    p[0] = y[l_i];
+    p[1] = t[0];
+    p[2] =
+        (3 * (y[l_i + 1] - y[l_i]) / (x[l_i + 1] - x[l_i]) - 2 * t[0] - t[1]) /
+        (x[l_i + 1] - x[l_i]);
+    p[3] = (t[0] + t[1] - 2 * (y[l_i + 1] - y[l_i]) / (x[l_i + 1] - x[l_i])) /
+           pow((x[l_i + 1] - x[l_i]), 2.0);
+
+    // Define Spline Polynomial and Calculate Interpolated Point
+    scalar y_out = 0.0;
+    y_out = y_out + p[0];
+    y_out = y_out + p[1] * (x_out - x[l_i]);
+    y_out = y_out + p[2] * pow((x_out - x[l_i]), 2.0);
+    y_out = y_out + p[3] * pow((x_out - x[l_i]), 3.0);
+    return y_out;
 }
 
 void DASolver::calcFvSource(
@@ -1826,8 +1829,9 @@ void DASolver::calcFvSource(
     Vec aForce,
     Vec tForce,
     Vec rDist,
-    Vec targetForce,
     Vec center,
+    scalar rInner,
+    scalar rOuter,
     Vec fvSource)
 {
     /*
@@ -1852,8 +1856,7 @@ void DASolver::calcFvSource(
     // Allocate Arrays
     Field<scalar> aForceTemp(nPoints);
     Field<scalar> tForceTemp(nPoints);
-    List<scalar> rDistTemp(nPoints);
-    List<scalar> targetForceTemp(2);
+    Field<scalar> rDistTemp(nPoints);
     Vector<scalar> centerTemp;
     volVectorField fvSourceTemp(
         IOobject(
@@ -1873,8 +1876,6 @@ void DASolver::calcFvSource(
     VecGetArray(tForce, &vecArrayTForce);
     PetscScalar* vecArrayRDist;
     VecGetArray(rDist, &vecArrayRDist);
-    PetscScalar* vecArrayTargetForce;
-    VecGetArray(targetForce, &vecArrayTargetForce);
     PetscScalar* vecArrayCenter;
     VecGetArray(center, &vecArrayCenter);
 
@@ -1885,14 +1886,12 @@ void DASolver::calcFvSource(
         tForceTemp[cI] = vecArrayTForce[cI];
         rDistTemp[cI] = vecArrayRDist[cI];
     }
-    targetForceTemp[0] = vecArrayTargetForce[0];
-    targetForceTemp[1] = vecArrayTargetForce[1];
     centerTemp[0] = vecArrayCenter[0];
     centerTemp[1] = vecArrayCenter[1];
     centerTemp[2] = vecArrayCenter[2];
 
     // Compute fvSource
-    this->calcFvSourceInternal(propName, aForceTemp, tForceTemp, rDistTemp, targetForceTemp, centerTemp, fvSourceTemp);
+    this->calcFvSourceInternal(propName, aForceTemp, tForceTemp, rDistTemp, centerTemp, rInner, rOuter, fvSourceTemp);
 
     VecZeroEntries(fvSource);
     PetscScalar* vecArrayFvSource;
@@ -1916,7 +1915,6 @@ void DASolver::calcFvSource(
     VecRestoreArray(aForce, &vecArrayAForce);
     VecRestoreArray(tForce, &vecArrayTForce);
     VecRestoreArray(rDist, &vecArrayRDist);
-    VecRestoreArray(targetForce, &vecArrayTargetForce);
     VecRestoreArray(center, &vecArrayCenter);
     VecRestoreArray(fvSource, &vecArrayFvSource);
 
@@ -1929,8 +1927,9 @@ void DASolver::calcdFvSourcedInputsTPsiAD(
     Vec aForce,
     Vec tForce,
     Vec rDist,
-    Vec targetForce,
     Vec center,
+    scalar rInner,
+    scalar rOuter,
     Vec psi,
     Vec dFvSource)
 {
@@ -1951,8 +1950,7 @@ void DASolver::calcdFvSourcedInputsTPsiAD(
 
     Field<scalar> aForceField(nPoints);
     Field<scalar> tForceField(nPoints);
-    List<scalar> rDistList(nPoints);
-    List<scalar> targetForceList(2);
+    Field<scalar> rDistList(nPoints);
     vector centerVector = vector::zero;
 
     volVectorField fvSourceVField(
@@ -1969,7 +1967,6 @@ void DASolver::calcdFvSourcedInputsTPsiAD(
     PetscScalar* vecArrayAForce;
     PetscScalar* vecArrayTForce;
     PetscScalar* vecArrayRDist;
-    PetscScalar* vecArrayTargetForce;
     PetscScalar* vecArrayCenter;
     const PetscScalar* vecArrayPsi;
 
@@ -1993,11 +1990,6 @@ void DASolver::calcdFvSourcedInputsTPsiAD(
         rDistList[i] = vecArrayRDist[i];
     }
     VecRestoreArray(rDist, &vecArrayRDist);
-
-    VecGetArray(targetForce, &vecArrayTargetForce);
-    targetForceList[0] = vecArrayTargetForce[0];
-    targetForceList[1] = vecArrayTargetForce[1];
-    VecRestoreArray(targetForce, &vecArrayTargetForce);
 
     VecGetArray(center, &vecArrayCenter);
     centerVector[0] = vecArrayCenter[0];
@@ -2029,19 +2021,20 @@ void DASolver::calcdFvSourcedInputsTPsiAD(
             this->globalADTape_.registerInput(rDistList[i]);
         }
     }
-    else if (mode == "targetForce")
-    {
-        for (label i = 0; i < 2; i++)
-        {
-            this->globalADTape_.registerInput(targetForceList[i]);
-        }
-    }
     else if (mode == "center")
     {
         for (label i = 0; i < 3; i++)
         {
             this->globalADTape_.registerInput(centerVector[i]);
         }
+    }
+    else if (mode == "rInner")
+    {
+        this->globalADTape_.registerInput(rInner);
+    }
+    else if (mode == "rOuter")
+    {
+        this->globalADTape_.registerInput(rOuter);
     }
     else
     {
@@ -2050,7 +2043,7 @@ void DASolver::calcdFvSourcedInputsTPsiAD(
     }
 
     // Step 3
-    this->calcFvSourceInternal(propName, aForceField, tForceField, rDistList, targetForceList, centerVector, fvSourceVField);
+    this->calcFvSourceInternal(propName, aForceField, tForceField, rDistList, centerVector, rInner, rOuter, fvSourceVField);
 
     // Step 4
     forAll(fvSourceVField, i)
@@ -2098,19 +2091,20 @@ void DASolver::calcdFvSourcedInputsTPsiAD(
             vecArrayProd[i] = rDistList[i].getGradient();
         }
     }
-    else if (mode == "targetForce")
-    {
-        forAll(targetForceList, i)
-        {
-            vecArrayProd[i] = targetForceList[i].getGradient();
-        }
-    }
     else if (mode == "center")
     {
         forAll(centerVector, i)
         {
             vecArrayProd[i] = centerVector[i].getGradient();
         }
+    }
+    else if (mode == "rInner")
+    {
+        vecArrayProd[0] = rInner.getGradient();
+    }
+    else if (mode == "rOuter")
+    {
+        vecArrayProd[0] = rOuter.getGradient();
     }
 
     VecRestoreArray(dFvSource, &vecArrayProd);
@@ -7012,6 +7006,7 @@ void DASolver::assignFieldGradient2Vec(
             {
                 label localIdx = cellI * 3 + i;
                 vecArray[localIdx] = state[cellI][i].getGradient();
+                this->globalADTape_.deactivateValue(state[cellI][i]);
             }
         }
     }

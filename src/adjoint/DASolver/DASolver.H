@@ -803,18 +803,31 @@ public:
         const word propName,
         const scalarField& aForce,
         const scalarField& tForce,
-        const scalarList& rDistList,
-        const scalarList& targetForce,
+        const scalarField& rDistList,
         const vector& center,
+        const scalar rInner,
+        const scalar rOuter,
         volVectorField& fvSource);
+
+    void setupAkima(
+        scalarField& m,
+        scalarField& x,
+        scalarField y);
+
+    scalar interpolateAkima(
+        scalarField& m,
+        scalarField& x,
+        scalarField y,
+        scalar x_out);
 
     void calcFvSource(
         const word propName,
         Vec aForce,
         Vec tForce,
         Vec rDist,
-        Vec targetForce,
         Vec center,
+        scalar rInner,
+        scalar rOuter,
         Vec fvSource);
 
     void calcdFvSourcedInputsTPsiAD(
@@ -823,8 +836,9 @@ public:
         Vec aForce,
         Vec tForce,
         Vec rDist,
-        Vec targetForce,
         Vec center,
+        scalar rInner,
+        scalar rOuter,
         Vec psi,
         Vec dFvSource);
 
