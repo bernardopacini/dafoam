@@ -134,8 +134,64 @@ class DAFoamBuilder(Builder):
                             raise RuntimeWarning("Actuator disk {} not found when adding masked nodes".format(fvSource))
 
                         # Count Nodes
-                        nodes += 1 + parameters["nNodes"]
+                        for name, surfaces in aerostructDict["couplingSurfaceGroups"].items():
+                            if parameters["surface"] in surfaces:
+                                nodes += 1 + parameters["nNodes"]
+                                break
         return nodes
+
+    def get_tagged_indices(self, tags):
+        """
+        Method that returns grid IDs for a list of body/boundary tags.
+
+        Parameters
+        ----------
+        tags : list[str]
+            List of surface tags to get grid IDs for. If tags is -1, then all grid IDs are returned.
+
+        Returns
+        -------
+        grid_ids : list[int]
+            list of grid IDs that correspond to given body/boundary tags
+        """
+        numNodes = self.get_number_of_nodes()
+        if tags == -1 or tags == [-1]:
+            return list(range(numNodes))
+
+        # Create a dummy input vector that represents the indices of all the surface nodes
+        vecin = np.zeros((numNodes, 3), dtype=np.intc)
+        vecin[:, 0] = np.arange(numNodes)
+
+        # --- Now loop through each tag and get the local node IDs of that surface ---
+        # Since there is no method for directly getting the node IDs of a given surface, we're going to use the
+        # mapVector function to map the vector of all node IDs to the surface of interest. This will give us the local
+        # node IDs of the surface of interest.
+        nodeInds = []
+        for tag in tags:
+            vecout = self.DASolver.mapVector(vecin, self.DASolver.couplingSurfacesGroup, tag)
+            nodeInds.append(vecout[:, 0].astype(int))
+
+        # --- Now return the combined list of all node IDs for the tags, with duplicates removed ---
+        grid_ids = np.hstack(nodeInds)
+
+        # --- Now add the fvSource node IDs, if used
+        if self.comm.rank == 0:
+            aerostructDict = self.DASolver.getOption("couplingInfo")["aerostructural"]
+            if aerostructDict["active"] and aerostructDict["propMovement"]:
+                if "fvSource" in aerostructDict.keys():
+                    nodes_aero = int(self.DASolver.getSurfaceCoordinates(groupName=self.DASolver.designSurfacesGroup).size / 3)
+                    fvSourceStart = nodes_aero
+                    fvSourceInds = []
+
+                    # Iterate through Actuator Disks
+                    for fvSource, parameters in aerostructDict["fvSource"].items():
+                        # Append Nodes
+                        if parameters["surface"] in tags:
+                            fvSourceInds.extend(list(range(fvSourceStart, fvSourceStart + 1 + parameters["nNodes"])))
+                        fvSourceStart += 1 + parameters["nNodes"]
+                    grid_ids = np.hstack((grid_ids, fvSourceInds))
+
+        return list(np.unique(grid_ids))
 
     def get_ndof(self):
         # The number of degrees of freedom used at each output location.
@@ -664,7 +720,7 @@ class DAFoamSolver(ImplicitComponent):
 
     def add_dvgeo(self, DVGeo):
         self.DVGeo = DVGeo
-    
+
     def add_dvcon(self, DVCon):
         self.DVCon = DVCon
 
@@ -724,10 +780,10 @@ class DAFoamSolver(ImplicitComponent):
             if couplingInfo["aerothermal"]["active"]:
                 if self.discipline == "aero":
                     T_convect = inputs["T_convect"]
-                    DASolver.solver.setThermal(T_convect)
+                    DASolver.setThermal(T_convect)
                 elif self.discipline == "thermal":
                     q_conduct = inputs["q_conduct"]
-                    DASolver.solver.setThermal(q_conduct)
+                    DASolver.setThermal(q_conduct)
                 else:
                     raise AnalysisError("discipline not valid!")
 
@@ -951,7 +1007,7 @@ class DAFoamSolver(ImplicitComponent):
                             raise RuntimeError("writeDeformedFFDs is set but no DVGeo object found! Please call add_dvgeo in the run script!")
                         else:
                             self.DVGeo.writeTecplot("deformedFFDs_%d.dat" % self.solution_counter)
-                    
+
                     if DASolver.getOption("writeDeformedConstraints"):
                         if self.DVCon is None:
                             raise RuntimeError("writeDeformedConstraints is set but no DVCon object found! Please call add_dvcon in the run script!")
@@ -2171,6 +2227,8 @@ class DAFoamPropNodes(ExplicitComponent):
 
                 # Add Input
                 self.add_input("x_prop0_%s" % fvSource, shape=3, distributed=False, tags=["mphys_coordinates"])
+                self.add_input("thrust_%s" % fvSource, shape=1, distributed=False, tags=["mphys_coordinates"])
+                self.add_input("torque_%s" % fvSource, shape=1, distributed=False, tags=["mphys_coordinates"])
 
                 # Add Output
                 if self.comm.rank == 0:
@@ -2219,15 +2277,27 @@ class DAFoamPropNodes(ExplicitComponent):
                 nodes_x[0, :] = center
                 nodes_f = np.zeros((n_theta + 1, 3))
                 if n_theta == 0:
-                    nodes_f[0, :] = -self.fvSourceDict[fvSource]["targetThrust"] * direction
+                    # Set thrust force
+                    nodes_f[0, :] = -inputs["thrust_%s" % fvSource] * direction
                 else:
                     nodes_f[0, :] = 0.0
                     for i in range(n_theta):
                         theta = i / n_theta * 2 * np.pi
-                        nodes_x[i + 1, :] = (
-                            center + radial_loc * y_local * np.cos(theta) + radial_loc * z_local * np.sin(theta)
-                        )
-                        nodes_f[i + 1, :] = -self.fvSourceDict[fvSource]["targetThrust"] * direction / n_theta
+
+                        # Set location
+                        x_loc = radial_loc * y_local * np.cos(theta) + radial_loc * z_local * np.sin(theta)
+                        nodes_x[i + 1, :] = center + x_loc
+
+                        # Set thrust force
+                        nodes_f[i + 1, :] += -inputs["thrust_%s" % fvSource] * direction / n_theta
+
+                        # Set torque force
+                        vec_dir = np.cross(direction, x_loc)
+                        vec_dir = vec_dir / np.linalg.norm(vec_dir, 2)
+                        if self.fvSourceDict[fvSource]["rotDir"] == "left":
+                            nodes_f[i + 1, :] += inputs["torque_%s" % fvSource] * vec_dir / n_theta / parameters["radialLoc"]
+                        else:
+                            nodes_f[i + 1, :] -= inputs["torque_%s" % fvSource] * vec_dir / n_theta / parameters["radialLoc"]
 
                 outputs["x_prop0_nodes_%s" % fvSource] = nodes_x.flatten()
                 outputs["f_prop_%s" % fvSource] = nodes_f.flatten()
@@ -2243,16 +2313,65 @@ class DAFoamPropNodes(ExplicitComponent):
             return
 
         for fvSource, parameters in self.aerostructDict["fvSource"].items():
+            # Compute local coordinate frame for ring of nodes
+            direction = self.fvSourceDict[fvSource]["direction"]
+            direction = direction / np.linalg.norm(direction, 2)
+            temp_vec = np.array([1.0, 0.0, 0.0])
+            y_local = np.cross(direction, temp_vec)
+            if np.linalg.norm(y_local, 2) < 1e-5:
+                temp_vec = np.array([0.0, 1.0, 0.0])
+                y_local = np.cross(direction, temp_vec)
+            y_local = y_local / np.linalg.norm(y_local, 2)
+            z_local = np.cross(direction, y_local)
+            z_local = z_local / np.linalg.norm(z_local, 2)
+
+            n_theta = parameters["nNodes"]
+            radial_loc = parameters["radialLoc"]
+
             if "x_prop0_%s" % fvSource in d_inputs:
                 if "x_prop0_nodes_%s" % fvSource in d_outputs:
-                    temp = np.zeros((parameters["nNodes"] + 1) * 3)
+                    temp = np.zeros((n_theta + 1) * 3)
                     # Take ring of node seeds, broadcast them, and add them to all procs
                     if self.comm.rank == 0:
                         temp[:] = d_outputs["x_prop0_nodes_%s" % fvSource]
                     self.comm.Bcast(temp, root=0)
-                    for i in range(parameters["nNodes"]):
+                    for i in range(n_theta + 1):
                         d_inputs["x_prop0_%s" % fvSource] += temp[3 * i : 3 * i + 3]
-
+            if "thrust_%s" % fvSource in d_inputs:
+                if "f_prop_%s" % fvSource in d_outputs:
+                    temp = np.zeros((parameters["nNodes"] + 1) * 3)
+                    # Take ring of node seeds, broadcast them, and add them to all procs
+                    if n_theta == 0:
+                        if self.comm.rank == 0:
+                            for i in range(3):
+                                temp[i] = -d_outputs["f_prop_%s" % fvSource][i] * direction[i]
+                        self.comm.Bcast(temp, root=0)
+                        d_inputs["thrust_%s" % fvSource] += np.sum(temp)
+                    else:
+                        if self.comm.rank == 0:
+                            for i in range(n_theta):
+                                for j in range(3):
+                                    temp[3 * (i + 1) + j] = -d_outputs["f_prop_%s" % fvSource][3 * (i + 1) + j] * direction[j] / n_theta
+                        self.comm.Bcast(temp, root=0)
+                        d_inputs["thrust_%s" % fvSource] += np.sum(temp)
+            if "torque_%s" % fvSource in d_inputs:
+                if "f_prop_%s" % fvSource in d_outputs:
+                    temp = np.zeros((parameters["nNodes"] + 1) * 3)
+                    # Take ring of node seeds, broadcast them, and add them to all procs
+                    if n_theta > 0:
+                        if self.comm.rank == 0:
+                            for i in range(n_theta):
+                                theta = i / n_theta * 2 * np.pi
+                                x_loc = radial_loc * y_local * np.cos(theta) + radial_loc * z_local * np.sin(theta)
+                                vec_dir = np.cross(direction, x_loc)
+                                vec_dir = vec_dir / np.linalg.norm(vec_dir, 2)
+                                for j in range(3):
+                                    if self.fvSourceDict[fvSource]["rotDir"] == "left":
+                                        temp[3 * (i + 1) + j] = d_outputs["f_prop_%s" % fvSource][3 * (i + 1) + j] * vec_dir[j] / n_theta / parameters["radialLoc"]
+                                    else:
+                                        temp[3 * (i + 1) + j] = -d_outputs["f_prop_%s" % fvSource][3 * (i + 1) + j] * vec_dir[j] / n_theta / parameters["radialLoc"]
+                        self.comm.Bcast(temp, root=0)
+                        d_inputs["torque_%s" % fvSource] += np.sum(temp)
 
 class DAFoamActuator(ExplicitComponent):
     """
