@@ -168,11 +168,15 @@ class DAFoamBuilder(Builder):
         # node IDs of the surface of interest.
         nodeInds = []
         for tag in tags:
-            vecout = self.DASolver.mapVector(vecin, self.DASolver.couplingSurfacesGroup, tag)
-            nodeInds.append(vecout[:, 0].astype(int))
+            if tag in self.DASolver.getOption("designSurfaces"):
+                vecout = self.DASolver.mapVector(vecin, self.DASolver.couplingSurfacesGroup, tag)
+                nodeInds.append(vecout[:, 0].astype(int))
 
         # --- Now return the combined list of all node IDs for the tags, with duplicates removed ---
-        grid_ids = np.hstack(nodeInds)
+        if len(nodeInds) > 0:
+            grid_ids = np.hstack(nodeInds)
+        else:
+            grid_ids = np.array([])
 
         # --- Now add the fvSource node IDs, if used
         if self.comm.rank == 0:
@@ -186,10 +190,11 @@ class DAFoamBuilder(Builder):
                     # Iterate through Actuator Disks
                     for fvSource, parameters in aerostructDict["fvSource"].items():
                         # Append Nodes
-                        if parameters["surface"] in tags:
+                        if fvSource in tags:
                             fvSourceInds.extend(list(range(fvSourceStart, fvSourceStart + 1 + parameters["nNodes"])))
                         fvSourceStart += 1 + parameters["nNodes"]
-                    grid_ids = np.hstack((grid_ids, fvSourceInds))
+                    if len(fvSourceInds) > 0:
+                        grid_ids = np.hstack((grid_ids, fvSourceInds))
 
         return list(np.unique(grid_ids))
 
