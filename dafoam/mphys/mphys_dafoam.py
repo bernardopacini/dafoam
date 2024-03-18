@@ -301,7 +301,7 @@ class DAFoamGroup(Group):
                 "force",
                 DAFoamForces(solver=self.DASolver),
                 promotes_inputs=["%s_vol_coords" % self.discipline, "%s_states" % self.discipline],
-                promotes_outputs=[("f_aero", "f_aero_masked")],
+                promotes_outputs=[("f_%s" % self.discipline, "f_%s_masked" % self.discipline)],
             )
 
         if self.thermal_coupling:
@@ -416,8 +416,8 @@ class DAFoamGroup(Group):
             mask[0][:] = True
             if nodes_prop > 0:
                 mask[0][3 * nodes_aero :] = False
-            input.append(MaskedVariableDescription("f_aero_masked", shape=(nodes_aero) * 3, tags=["mphys_coupling"]))
-            promotes_inputs.append("f_aero_masked")
+            input.append(MaskedVariableDescription("f_%s_masked" % self.discipline, shape=(nodes_aero) * 3, tags=["mphys_coupling"]))
+            promotes_inputs.append("f_%s_masked" % self.discipline)
 
             if aerostructDict["active"] and aerostructDict["propMovement"]:
                 if "fvSource" in aerostructDict.keys():
@@ -448,8 +448,8 @@ class DAFoamGroup(Group):
                         i_fvSource += 1
 
             # Define Mask
-            output = MaskedVariableDescription("f_aero", shape=(nodes_total) * 3, tags=["mphys_coupling"])
-            promotes_outputs.append("f_aero")
+            output = MaskedVariableDescription("f_%s" % self.discipline, shape=(nodes_total) * 3, tags=["mphys_coupling"])
+            promotes_outputs.append("f_%s" % self.discipline)
             unmasker = UnmaskedConverter(input=input, output=output, mask=mask, distributed=True, default_values=0.0)
             self.add_subsystem(
                 "force_unmasker", unmasker, promotes_inputs=promotes_inputs, promotes_outputs=promotes_outputs
@@ -1732,13 +1732,13 @@ class DAFoamForces(ExplicitComponent):
         self.add_input("%s_states" % self.discipline, distributed=True, shape_by_conn=True, tags=["mphys_coupling"])
 
         local_surface_coord_size = self.DASolver.getSurfaceCoordinates(self.DASolver.couplingSurfacesGroup).size
-        self.add_output("f_aero", distributed=True, shape=local_surface_coord_size, tags=["mphys_coupling"])
+        self.add_output("f_%s" % self.discipline, distributed=True, shape=local_surface_coord_size, tags=["mphys_coupling"])
 
     def compute(self, inputs, outputs):
 
         self.DASolver.setStates(inputs["%s_states" % self.discipline])
 
-        outputs["f_aero"] = self.DASolver.getForces().flatten(order="C")
+        outputs["f_%s" % self.discipline] = self.DASolver.getForces().flatten(order="C")
 
     def compute_jacvec_product(self, inputs, d_inputs, d_outputs, mode):
 
@@ -1753,8 +1753,8 @@ class DAFoamForces(ExplicitComponent):
             )
             return
 
-        if "f_aero" in d_outputs:
-            fBar = d_outputs["f_aero"]
+        if "f_%s" % self.discipline in d_outputs:
+            fBar = d_outputs["f_%s" % self.discipline]
             fBarVec = DASolver.array2Vec(fBar)
 
             if "%s_vol_coords" % self.discipline in d_inputs:
